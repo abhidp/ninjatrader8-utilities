@@ -755,49 +755,43 @@ namespace NinjaTrader.NinjaScript.Strategies
 				textBrushDX, 0.5f);
 			textY += 8;
 
-			// Direction
+			// All labels padded to 11 chars (Consolas monospace) for aligned values
 			string dirSymbol = isLong ? "▲" : "▼";
-			DrawPanelTextLine(string.Format("Direction:  {0} {1}", dirSymbol, direction), textX, textY, textW, textFormat, dirBrush);
+			DrawPanelTextLine("Direction: " + dirSymbol + " " + direction, textX, textY, textW, textFormat, dirBrush);
 			textY += lineHeight;
 
-			// Entry
-			DrawPanelTextLine(string.Format("Entry:      {0}", FormatPrice(entryPrice)), textX, textY, textW, textFormat, textBrushDX);
+			DrawPanelTextLine("Entry:     " + FormatPrice(entryPrice), textX, textY, textW, textFormat, textBrushDX);
 			textY += lineHeight;
 
-			// Risk
-			DrawPanelTextLine(string.Format("Risk:       ${0}  ({1}pts)", riskDollars.ToString("F2"), FormatPoints(slPoints)), textX, textY, textW, textFormat, slBrushDX);
+			DrawPanelTextLine("Risk:      $" + riskDollars.ToString("F2") + "  " + FormatPoints(slPoints) + "pts", textX, textY, textW, textFormat, slBrushDX);
 			textY += lineHeight;
 
-			// Reward
-			DrawPanelTextLine(string.Format("Reward:     ${0}  ({1}pts)", rewardDollars.ToString("F2"), FormatPoints(tpPoints)), textX, textY, textW, textFormat, tpBrushDX);
+			DrawPanelTextLine("Reward:    $" + rewardDollars.ToString("F2") + "  " + FormatPoints(tpPoints) + "pts", textX, textY, textW, textFormat, tpBrushDX);
 			textY += lineHeight;
 
-			// R:R Ratio
-			DrawPanelTextLine(string.Format("R:R Ratio:  1 : {0}", rrRatio.ToString("F1")), textX, textY, textW, textFormat, textBrushDX);
+			DrawPanelTextLine("R:R Ratio: 1 : " + rrRatio.ToString("F1"), textX, textY, textW, textFormat, textBrushDX);
 			textY += lineHeight;
 
-			// Contracts
-			DrawPanelTextLine(string.Format("Contracts:  {0}", contractSize), textX, textY, textW, textFormat, textBrushDX);
+			DrawPanelTextLine("Contracts: " + contractSize, textX, textY, textW, textFormat, textBrushDX);
 			textY += lineHeight;
 
-			// Mode
-			string modeText;
+			string modeValue;
 			switch (SelectedRiskMode)
 			{
 				case RiskMode.FixedCash:
-					modeText = string.Format("Mode:       ${0} Fixed", RiskValue.ToString("F0"));
+					modeValue = "$" + RiskValue.ToString("F0") + " Fixed";
 					break;
 				case RiskMode.PercentOfAccount:
-					modeText = string.Format("Mode:       {0}% Account", RiskValue.ToString("F1"));
+					modeValue = RiskValue.ToString("F1") + "% Account";
 					break;
 				case RiskMode.FixedContracts:
-					modeText = string.Format("Mode:       {0} Contracts", RiskValue.ToString("F0"));
+					modeValue = RiskValue.ToString("F0") + " Contracts";
 					break;
 				default:
-					modeText = "";
+					modeValue = "";
 					break;
 			}
-			DrawPanelTextLine(modeText, textX, textY, textW, textFormat, textBrushDX);
+			DrawPanelTextLine("Mode:      " + modeValue, textX, textY, textW, textFormat, textBrushDX);
 		}
 
 		private void DrawPanelTextLine(string text, float x, float y, float width, SharpDX.DirectWrite.TextFormat format, SharpDX.Direct2D1.Brush brush)
