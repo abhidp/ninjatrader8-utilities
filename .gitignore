@@ -1,0 +1,21 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Claude Code
+.claude/
+
+# Build
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
