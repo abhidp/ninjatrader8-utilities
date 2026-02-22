@@ -38,14 +38,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private enum DragTarget { None, Entry, StopLoss, TakeProfit, BoxMove, BoxResizeLeft, BoxResizeRight }
 		private const float EdgeHitZone = 8; // pixels from edge to trigger resize
 
-		// Box horizontal position (left edge X in pixels, draggable)
-		private float boxLeftX = -1;
-		private float boxWidth = 200;
+		// Box horizontal position anchored to bar indices (scrolls with chart)
+		private int boxLeftBarIndex = -1;
+		private int boxRightBarIndex = -1;
+		private bool boxAnchored;
+		// Cached pixel positions (recalculated each render)
+		private float boxLeftX;
+		private float boxRightX;
 		private float dragStartMouseX;
 		private float dragStartMouseY;
 		private double dragStartEntryPrice;
 		private double dragStartSlPrice;
 		private double dragStartTpPrice;
+		private int dragStartLeftBarIndex;
+		private int dragStartRightBarIndex;
 
 		// Price levels
 		private double entryPrice;
@@ -85,6 +91,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private Order stopOrder;
 		private Order targetOrder;
 		private string ocoId;
+
+		// Snapshot SL/TP at order submission (for pending orders that fill later)
+		private double submittedSlPrice;
+		private double submittedTpPrice;
+		private int submittedContractSize;
+		private bool submittedIsLong;
 
 		// Hit test threshold in pixels
 		private const int HitTestThreshold = 10;
@@ -283,13 +295,32 @@ namespace NinjaTrader.NinjaScript.Strategies
 		{
 			if (cachedChartScale == null) return;
 
-			// Ctrl+Right-click for strategy context menu (normal right-click passes through to NT8)
-			if (e.RightButton == System.Windows.Input.MouseButtonState.Pressed
-				&& (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) != 0)
+			// Right-click on RR box or info panel opens our context menu; elsewhere passes through to NT8
+			if (e.RightButton == System.Windows.Input.MouseButtonState.Pressed && isToolVisible)
 			{
-				ShowContextMenu();
-				e.Handled = true;
-				return;
+				System.Windows.Point rp = e.GetPosition(ChartControl);
+				float rx = (float)rp.X;
+				float ry = (float)rp.Y;
+
+				bool inInfoPanel = (rx >= 15 && rx <= 235 && ry >= 15 && ry <= 215);
+
+				bool inRRBox = false;
+				if (cachedChartScale != null)
+				{
+					float ey = cachedChartScale.GetYByValue(entryPrice);
+					float sy = cachedChartScale.GetYByValue(slPrice);
+					float ty = cachedChartScale.GetYByValue(tpPrice);
+					float minY = Math.Min(ey, Math.Min(sy, ty));
+					float maxY = Math.Max(ey, Math.Max(sy, ty));
+					inRRBox = (rx >= boxLeftX && rx <= boxRightX && ry >= minY && ry <= maxY);
+				}
+
+				if (inInfoPanel || inRRBox)
+				{
+					ShowContextMenu();
+					e.Handled = true;
+					return;
+				}
 			}
 
 			if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
@@ -303,8 +334,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			float slY = cachedChartScale.GetYByValue(slPrice);
 			float tpY = cachedChartScale.GetYByValue(tpPrice);
 
-			float boxRight = boxLeftX + boxWidth;
-			bool inBoxX = (mouseX >= boxLeftX && mouseX <= boxRight);
+			bool inBoxX = (mouseX >= boxLeftX && mouseX <= boxRightX);
 
 			// Check line hit-tests (within box horizontal range and near labels)
 			if (Math.Abs(mouseY - entryY) <= HitTestThreshold)
@@ -338,14 +368,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 					isDragging = true;
 					currentDragTarget = DragTarget.BoxResizeLeft;
 					dragStartMouseX = mouseX;
+					dragStartLeftBarIndex = boxLeftBarIndex;
 					e.Handled = true;
 				}
-				else if (inBoxY && Math.Abs(mouseX - (boxLeftX + boxWidth)) <= EdgeHitZone)
+				else if (inBoxY && Math.Abs(mouseX - boxRightX) <= EdgeHitZone)
 				{
 					// Right edge resize
 					isDragging = true;
 					currentDragTarget = DragTarget.BoxResizeRight;
 					dragStartMouseX = mouseX;
+					dragStartRightBarIndex = boxRightBarIndex;
 					e.Handled = true;
 				}
 				else if (inBoxX && inBoxY)
@@ -358,6 +390,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 					dragStartEntryPrice = entryPrice;
 					dragStartSlPrice = slPrice;
 					dragStartTpPrice = tpPrice;
+					dragStartLeftBarIndex = boxLeftBarIndex;
+					dragStartRightBarIndex = boxRightBarIndex;
 					e.Handled = true;
 				}
 			}
@@ -373,15 +407,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if (currentDragTarget == DragTarget.BoxMove)
 			{
-				// Horizontal movement
-				float deltaX = mouseX - dragStartMouseX;
-				boxLeftX += deltaX;
-				dragStartMouseX = mouseX;
+				// Horizontal movement - compute bar delta from original start position
+				float pixelDelta = mouseX - dragStartMouseX;
+				double barWidth = chartControl_barDistance > 0 ? chartControl_barDistance : 10;
+				int barDelta = (int)Math.Round(pixelDelta / barWidth);
 
-				// Clamp to chart bounds
-				float maxX = (float)ChartControl.ActualWidth - 170 - boxWidth;
-				if (boxLeftX < 0) boxLeftX = 0;
-				if (boxLeftX > maxX) boxLeftX = maxX;
+				int span = dragStartRightBarIndex - dragStartLeftBarIndex;
+				int newLeft = dragStartLeftBarIndex + barDelta;
+				if (newLeft < 0) newLeft = 0;
+				boxLeftBarIndex = newLeft;
+				boxRightBarIndex = newLeft + span;
 
 				// Vertical movement - shift all 3 prices by same amount (preserves box shape)
 				double priceAtStart = cachedChartScale.GetValueByY(dragStartMouseY);
@@ -396,30 +431,25 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			else if (currentDragTarget == DragTarget.BoxResizeLeft)
 			{
-				float deltaX = mouseX - dragStartMouseX;
-				float newLeftX = boxLeftX + deltaX;
-				float newWidth = boxWidth - deltaX;
-
-				// Enforce minimum width
-				if (newWidth >= 60)
-				{
-					boxLeftX = newLeftX;
-					boxWidth = newWidth;
-					dragStartMouseX = mouseX;
-				}
+				// Compute bar delta from original start position
+				float pixelDelta = mouseX - dragStartMouseX;
+				double barWidth = chartControl_barDistance > 0 ? chartControl_barDistance : 10;
+				int barDelta = (int)Math.Round(pixelDelta / barWidth);
+				int newLeftBar = dragStartLeftBarIndex + barDelta;
+				// Enforce minimum width (at least 3 bars)
+				if (boxRightBarIndex - newLeftBar >= 3)
+					boxLeftBarIndex = newLeftBar;
 			}
 			else if (currentDragTarget == DragTarget.BoxResizeRight)
 			{
-				float deltaX = mouseX - dragStartMouseX;
-				float newWidth = boxWidth + deltaX;
-
-				// Enforce minimum width and max bound
-				float maxRight = (float)ChartControl.ActualWidth - 170;
-				if (newWidth >= 60 && boxLeftX + newWidth <= maxRight)
-				{
-					boxWidth = newWidth;
-					dragStartMouseX = mouseX;
-				}
+				// Compute bar delta from original start position
+				float pixelDelta = mouseX - dragStartMouseX;
+				double barWidth = chartControl_barDistance > 0 ? chartControl_barDistance : 10;
+				int barDelta = (int)Math.Round(pixelDelta / barWidth);
+				int newRightBar = dragStartRightBarIndex + barDelta;
+				// Enforce minimum width (at least 3 bars)
+				if (newRightBar - boxLeftBarIndex >= 3)
+					boxRightBarIndex = newRightBar;
 			}
 			else
 			{
@@ -578,8 +608,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if (RenderTarget == null) return;
 
-			// Cache the chart scale for mouse event handlers
+			// Cache chart state for mouse event handlers
 			cachedChartScale = chartScale;
+			chartControl_barDistance = chartControl.Properties.BarDistance;
 
 			// Fallback initialization - always try from last bar close
 			if (!levelsInitialized)
@@ -607,11 +638,25 @@ namespace NinjaTrader.NinjaScript.Strategies
 			float slY = chartScale.GetYByValue(slPrice);
 			float tpY = chartScale.GetYByValue(tpPrice);
 
-			// Initialize box position to right-center of chart on first render
-			if (boxLeftX < 0)
-				boxLeftX = chartWidth - labelAreaWidth - boxWidth - 20;
+			// Initialize box anchored to bar indices on first render
+			if (!boxAnchored && ChartBars != null)
+			{
+				int lastBarIdx = ChartBars.ToIndex;
+				int barSpan = Math.Max(5, (int)(200.0 / chartControl.Properties.BarDistance));
+				boxRightBarIndex = Math.Max(0, lastBarIdx - 2);
+				boxLeftBarIndex = Math.Max(0, boxRightBarIndex - barSpan);
+				boxAnchored = true;
+			}
 
-			float boxRightX = boxLeftX + boxWidth;
+			if (!boxAnchored) return;
+
+			// Convert bar indices to pixel X positions (moves with chart scroll)
+			// Use bar spacing to extrapolate for indices outside visible range
+			double barDist = chartControl.Properties.BarDistance;
+			int fromIdx = ChartBars.FromIndex;
+			int fromX = chartControl.GetXByBarIndex(ChartBars, fromIdx);
+			boxLeftX = (float)(fromX + (boxLeftBarIndex - fromIdx) * barDist);
+			boxRightX = (float)(fromX + (boxRightBarIndex - fromIdx) * barDist);
 
 			// Draw bounded zone boxes (TradingView style)
 			DrawZoneBox(boxLeftX, entryY, boxRightX, slY, riskZoneBrushDX, slBrushDX);
@@ -621,7 +666,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			RenderTarget.DrawLine(new Vector2(boxLeftX, entryY), new Vector2(boxRightX, entryY), entryBrushDX, LineWidth + 1);
 
 			// Draw drag handles on all three lines
-			float handleCenterX = boxLeftX + boxWidth / 2;
+			float handleCenterX = boxLeftX + (boxRightX - boxLeftX) / 2;
 			DrawDragHandle(handleCenterX, entryY, entryBrushDX);
 			DrawDragHandle(handleCenterX, slY, slBrushDX);
 			DrawDragHandle(handleCenterX, tpY, tpBrushDX);
@@ -821,6 +866,23 @@ namespace NinjaTrader.NinjaScript.Strategies
 			return points.ToString("F" + decimals);
 		}
 
+			private int GetBarIndexByX(int x)
+		{
+			if (ChartControl == null || ChartBars == null) return 0;
+
+			// Calculate bar index from pixel X using bar spacing
+			double barWidth = chartControl_barDistance > 0 ? chartControl_barDistance : 10;
+			int firstBarX = ChartControl.GetXByBarIndex(ChartBars, ChartBars.FromIndex);
+			int barOffset = (int)Math.Round((x - firstBarX) / barWidth);
+			int barIndex = ChartBars.FromIndex + barOffset;
+
+			// Clamp to valid range
+			return Math.Max(0, Math.Min(barIndex, ChartBars.ToIndex + 20));
+		}
+
+		// Cached bar distance - updated each render
+		private double chartControl_barDistance;
+
 		#endregion
 
 		#region Context Menu and Order Execution
@@ -1015,26 +1077,31 @@ namespace NinjaTrader.NinjaScript.Strategies
 					return;
 			}
 
-			ocoId = Guid.NewGuid().ToString();
+			// Snapshot current levels for when the order fills
+			submittedSlPrice = slPrice;
+			submittedTpPrice = tpPrice;
+			submittedContractSize = contractSize;
+			submittedIsLong = isLong;
 
 			try
 			{
-				double limitPrice = (orderType == OrderType.Limit) ? entryPrice : 0;
-				double stopPrice = (orderType == OrderType.StopMarket) ? entryPrice : 0;
+				double limitPx = (orderType == OrderType.Limit) ? entryPrice : 0;
+				double stopPx = (orderType == OrderType.StopMarket) ? entryPrice : 0;
 
+				// Entry order gets no OCO id - bracket is placed separately on fill
 				if (isLong)
 				{
 					entryOrder = SubmitOrderUnmanaged(0, OrderAction.Buy, orderType,
-						contractSize, limitPrice, stopPrice, ocoId, "RRT_Entry");
+						contractSize, limitPx, stopPx, "", "RRT_Entry");
 				}
 				else
 				{
 					entryOrder = SubmitOrderUnmanaged(0, OrderAction.Sell, orderType,
-						contractSize, limitPrice, stopPrice, ocoId, "RRT_Entry");
+						contractSize, limitPx, stopPx, "", "RRT_Entry");
 				}
 
-				Print(string.Format("RiskRewardTool: {0} order submitted - {1} contracts @ {2}",
-					isLong ? "LONG" : "SHORT", contractSize, FormatPrice(entryPrice)));
+				Print(string.Format("RiskRewardTool: {0} {1} submitted - {2} contracts @ {3}",
+					isLong ? "LONG" : "SHORT", orderTypeLabel, contractSize, FormatPrice(entryPrice)));
 			}
 			catch (Exception ex)
 			{
@@ -1073,19 +1140,23 @@ namespace NinjaTrader.NinjaScript.Strategies
 					return;
 			}
 
-			ocoId = Guid.NewGuid().ToString();
+			// Snapshot current levels
+			submittedSlPrice = slPrice;
+			submittedTpPrice = tpPrice;
+			submittedContractSize = contractSize;
+			submittedIsLong = isLong;
 
 			try
 			{
 				if (isLong)
 				{
 					entryOrder = SubmitOrderUnmanaged(0, OrderAction.Buy, OrderType.Market,
-						contractSize, 0, 0, ocoId, "RRT_Entry");
+						contractSize, 0, 0, "", "RRT_Entry");
 				}
 				else
 				{
 					entryOrder = SubmitOrderUnmanaged(0, OrderAction.Sell, OrderType.Market,
-						contractSize, 0, 0, ocoId, "RRT_Entry");
+						contractSize, 0, 0, "", "RRT_Entry");
 				}
 
 				Print(string.Format("RiskRewardTool: {0} MARKET order submitted - {1} contracts",
@@ -1102,10 +1173,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 			int quantity, int filled, double averageFillPrice, OrderState orderState,
 			DateTime time, ErrorCode error, string comment)
 		{
+			// Place OCO bracket when entry fills (works for Market, Limit, and Stop entries)
 			if (order.Name == "RRT_Entry" && orderState == OrderState.Filled)
 			{
 				entryOrder = order;
-				PlaceOCOBracket(order.IsLong);
+				PlaceOCOBracket(submittedIsLong);
+				Print(string.Format("RiskRewardTool: Entry filled @ {0} - placing OCO bracket",
+					FormatPrice(averageFillPrice)));
 			}
 
 			if (error != ErrorCode.NoError)
@@ -1121,25 +1195,26 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			try
 			{
+				// Use snapshotted values from when the order was submitted
 				if (isLong)
 				{
 					stopOrder = SubmitOrderUnmanaged(0, OrderAction.Sell, OrderType.StopMarket,
-						contractSize, 0, slPrice, bracketOcoId, "RRT_StopLoss");
+						submittedContractSize, 0, submittedSlPrice, bracketOcoId, "RRT_StopLoss");
 
 					targetOrder = SubmitOrderUnmanaged(0, OrderAction.Sell, OrderType.Limit,
-						contractSize, tpPrice, 0, bracketOcoId, "RRT_TakeProfit");
+						submittedContractSize, submittedTpPrice, 0, bracketOcoId, "RRT_TakeProfit");
 				}
 				else
 				{
 					stopOrder = SubmitOrderUnmanaged(0, OrderAction.Buy, OrderType.StopMarket,
-						contractSize, 0, slPrice, bracketOcoId, "RRT_StopLoss");
+						submittedContractSize, 0, submittedSlPrice, bracketOcoId, "RRT_StopLoss");
 
 					targetOrder = SubmitOrderUnmanaged(0, OrderAction.Buy, OrderType.Limit,
-						contractSize, tpPrice, 0, bracketOcoId, "RRT_TakeProfit");
+						submittedContractSize, submittedTpPrice, 0, bracketOcoId, "RRT_TakeProfit");
 				}
 
-				Print(string.Format("RiskRewardTool: OCO Bracket placed - SL: {0}, TP: {1}",
-					FormatPrice(slPrice), FormatPrice(tpPrice)));
+				Print(string.Format("RiskRewardTool: OCO Bracket placed - SL: {0}, TP: {1}, Qty: {2}",
+					FormatPrice(submittedSlPrice), FormatPrice(submittedTpPrice), submittedContractSize));
 			}
 			catch (Exception ex)
 			{
