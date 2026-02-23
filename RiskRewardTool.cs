@@ -110,6 +110,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 		// Cached chart scale reference for mouse handlers
 		private ChartScale cachedChartScale;
 
+		// Flip button bounds (set during render, used for click detection)
+		private SharpDX.RectangleF flipButtonRect;
+
 		#endregion
 
 		#region Parameters
@@ -221,7 +224,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				StopLossLineBrush = Brushes.Crimson;
 				TakeProfitLineBrush = Brushes.LimeGreen;
 				LineWidth = 2;
-				ZoneOpacity = 20;
+				ZoneOpacity = 10;
 				TextBrush = Brushes.White;
 			}
 			else if (State == State.Configure)
@@ -302,7 +305,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				float rx = (float)rp.X;
 				float ry = (float)rp.Y;
 
-				bool inInfoPanel = (rx >= 15 && rx <= 235 && ry >= 15 && ry <= 215);
+				bool inInfoPanel = (rx >= 15 && rx <= 235 && ry >= 15 && ry <= 247);
 
 				bool inRRBox = false;
 				if (cachedChartScale != null)
@@ -325,6 +328,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
 			if (!isToolVisible) return;
+
+			// Check flip button click
+			System.Windows.Point fp = e.GetPosition(ChartControl);
+			if (flipButtonRect.Width > 0
+				&& fp.X >= flipButtonRect.Left && fp.X <= flipButtonRect.Right
+				&& fp.Y >= flipButtonRect.Top && fp.Y <= flipButtonRect.Bottom)
+			{
+				FlipDirection();
+				e.Handled = true;
+				return;
+			}
 
 			System.Windows.Point point = e.GetPosition(ChartControl);
 			float mouseX = (float)point.X;
@@ -737,7 +751,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			float labelHeight = 38;
 
 			// Entry label (with contract size)
-			string entryText = string.Format("ENTRY  {0}\n{1} contracts", FormatPrice(entryPrice), contractSize);
+			string entryText = string.Format("ENTRY  {0}\n{1} ct    {2}R", FormatPrice(entryPrice), contractSize, rrRatio.ToString("F1"));
 			DrawPriceLabel(labelX, entryY - labelHeight / 2, labelWidth, labelHeight, entryText, entryBrushDX);
 
 			// SL label (show points)
@@ -764,7 +778,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private void DrawInfoPanel()
 		{
 			float panelWidth = 220;
-			float panelHeight = 200;
+			float panelHeight = 232;
 			float panelX = 15;
 			float panelY = 15;
 			float padding = 12;
@@ -837,6 +851,27 @@ namespace NinjaTrader.NinjaScript.Strategies
 					break;
 			}
 			DrawPanelTextLine("Mode:      " + modeValue, textX, textY, textW, textFormat, textBrushDX);
+			textY += lineHeight + 4;
+
+			// FLIP button
+			bool isLongNow = IsLongSetup();
+			string flipLabel = isLongNow ? "FLIP to SHORT" : "FLIP to LONG";
+			SharpDX.Direct2D1.Brush flipBgBrush = isLongNow ? slBrushDX : tpBrushDX;
+
+			float btnWidth = textW;
+			float btnHeight = 20;
+			flipButtonRect = new SharpDX.RectangleF(textX, textY, btnWidth, btnHeight);
+			var btnRounded = new RoundedRectangle { Rect = flipButtonRect, RadiusX = 3, RadiusY = 3 };
+			RenderTarget.FillRoundedRectangle(btnRounded, flipBgBrush);
+
+			var btnTextRect = new SharpDX.RectangleF(textX, textY + 3, btnWidth, btnHeight - 4);
+			using (var centerFormat = new SharpDX.DirectWrite.TextFormat(
+				Core.Globals.DirectWriteFactory, "Consolas",
+				SharpDX.DirectWrite.FontWeight.Bold, SharpDX.DirectWrite.FontStyle.Normal, 11f)
+				{ TextAlignment = SharpDX.DirectWrite.TextAlignment.Center })
+			{
+				RenderTarget.DrawText(flipLabel, centerFormat, btnTextRect, textBrushDX);
+			}
 		}
 
 		private void DrawPanelTextLine(string text, float x, float y, float width, SharpDX.DirectWrite.TextFormat format, SharpDX.Direct2D1.Brush brush)
